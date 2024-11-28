@@ -16,10 +16,11 @@ import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { KeywordService } from 'src/keyword/keyword.service';
 import { Keyword } from 'src/keyword/entities/keyword.entity';
-import { TransactionCategory } from './entities/transaction-category.entity';
-import { CreateTransactionCategoryDto } from './dto/create-transaction-category-dto';
-import { UpdateTransactionCategoryDto } from './dto/update-transaction-category-dto';
+import { Category } from './entities/category.entity';
+import { CreateCategoryDto } from './dto/create-category-dto';
+import { UpdateCategoryDto } from './dto/update-category-dto';
 import { KeywordDto } from 'src/keyword/dto/keyword-dto';
+import { create } from 'domain';
 
 @Injectable()
 export class TransactionService {
@@ -29,8 +30,8 @@ export class TransactionService {
         @InjectRepository(Transaction)
         private readonly transactionRepository: Repository<Transaction>,
         private readonly keywordService: KeywordService,
-        @InjectRepository(TransactionCategory)
-        private readonly transactionCategoryRepository: Repository<TransactionCategory>
+        @InjectRepository(Category)
+        private readonly transactionCategoryRepository: Repository<Category>
     ) {}
 
     checkIfNameOfTransactionContainsGivenWord(
@@ -41,11 +42,9 @@ export class TransactionService {
     }
 
     async updateTransactionsAfterCategoriesGetUpdated(): Promise<void> {
-        const categories: TransactionCategory[] = await this.findAllCategories();
-        const notMappedCategory: TransactionCategory = categories.find(
-            (c) => c.name === 'NOT_MAPPED'
-        );
-        const incomeCategory: TransactionCategory = categories.find((c) => c.name === 'INCOME');
+        const categories: Category[] = await this.findAllCategories();
+        const notMappedCategory: Category = categories.find((c) => c.name === 'NOT_MAPPED');
+        const incomeCategory: Category = categories.find((c) => c.name === 'INCOME');
         const transactions: Transaction[] = await this.findAllTransactionsFiltered(
             new TransactionFilterDto(undefined, undefined, notMappedCategory.id)
         );
@@ -77,15 +76,14 @@ export class TransactionService {
     }
 
     async createTransaction(createTransactionDto: CreateTransactionDto): Promise<Transaction> {
-        let category: TransactionCategory = await this.findCategoryById(
-            createTransactionDto.category
-        );
+        let category: Category = await this.findCategoryById(createTransactionDto.category);
         const transaction: Transaction = new Transaction(
             createTransactionDto.date,
             createTransactionDto.nameOfPlace,
             createTransactionDto.amount,
             category
         );
+        this.checkIfCategoryTypeMatchesTransactionAmount(category, transaction);
         const savedTransaction = await this.transactionRepository.save(transaction);
         if (
             createTransactionDto.categoryKeyword !== null &&
@@ -111,9 +109,8 @@ export class TransactionService {
         if (!transaction) {
             throw new NotFoundException(`Transaction with ${id} was not found`);
         }
-        const category: TransactionCategory = await this.findCategoryById(
-            updateTransactionDto.category
-        );
+        const category: Category = await this.findCategoryById(updateTransactionDto.category);
+        this.checkIfCategoryTypeMatchesTransactionAmount(category, transaction);
         const oldTransactionCategoryName = transaction.category.name;
         if (
             oldTransactionCategoryName !== 'NOT_MAPPED' &&
@@ -135,6 +132,24 @@ export class TransactionService {
         return savedTransaction;
     }
 
+    checkIfCategoryTypeMatchesTransactionAmount(category: Category, transaction: Transaction) {
+        if (
+            (category.isExpense && transaction.amount > 0) ||
+            (!category.isExpense && transaction.amount < 0)
+        ) {
+            console.log(
+                'Category: ',
+                category.id,
+                ' is expense and tran: ',
+                transaction.nameOfPlace,
+                ' has amount: ',
+                transaction.amount
+            );
+            throw new BadRequestException(
+                'Category can not be of type expense/income while amount is greater/lesser than 0.'
+            );
+        }
+    }
     deleteTransactionById(id: number): void {
         const options: any = { id: id };
         this.transactionRepository.delete(options);
@@ -165,18 +180,37 @@ export class TransactionService {
                     ? row.values[2].toString()
                     : 'TRANSACTION WITHOUT NAME';
                 const transAmount: number = parseInt(row.values[4]) ? parseInt(row.values[4]) : 0;
-                const category: TransactionCategory = getCategory(transName, transAmount);
+                const category: Category = getCategory(transName, transAmount);
                 console.log('category for row: ', category);
                 console.log('transDate for row: ', transDate);
                 console.log('transName for row: ', transName);
                 console.log('transAmount for row: ', transAmount);
                 if (category && category.name === 'Fuel and liquids') {
-                    splitTransactionsFromFuelStationsToFuelAndMarket(
-                        transAmount,
-                        transDate,
-                        transName,
-                        category
-                    );
+                    if (transAmount % 500 === 0) {
+                        const transaction = new Transaction(
+                            transDate,
+                            transName,
+                            transAmount,
+                            category
+                        );
+                        transactions.push(transaction);
+                    } else {
+                        const marketCat = categories.find((c) => c.name === 'Market');
+                        const splittedFuelTrans = new Transaction(
+                            transDate,
+                            transName,
+                            transAmount - (transAmount % 500),
+                            category
+                        );
+                        const splittedMarketTrans = new Transaction(
+                            transDate,
+                            transName,
+                            transAmount % 500,
+                            marketCat
+                        );
+                        transactions.push(splittedMarketTrans);
+                        transactions.push(splittedFuelTrans);
+                    }
                 } else if (category) {
                     const transaction = new Transaction(
                         transDate,
@@ -188,38 +222,9 @@ export class TransactionService {
                 }
             });
 
-            function splitTransactionsFromFuelStationsToFuelAndMarket(
-                transAmount: number,
-                transDate: Date,
-                transName: string,
-                category: TransactionCategory
-            ) {
-                if (transAmount % 500 === 0) {
-                    const transaction = new Transaction(
-                        transDate,
-                        transName,
-                        transAmount,
-                        category
-                    );
-                    transactions.push(transaction);
-                } else {
-                    const marketCat = categories.find((c) => c.name === 'Market');
-                    const splittedFuelTrans = new Transaction(
-                        transDate,
-                        transName,
-                        transAmount - (transAmount % 500),
-                        category
-                    );
-                    const splittedMarketTrans = new Transaction(
-                        transDate,
-                        transName,
-                        transAmount % 500,
-                        marketCat
-                    );
-                    transactions.push(splittedMarketTrans);
-                    transactions.push(splittedFuelTrans);
-                }
-            }
+            //function splitFuelTransaction(transactions: Transaction[], transDate: Date, transName: string,
+            //                             transAmount: number, category: TransactionCategory){
+            //}
 
             function checkIfNameOfTransactionContainsGivenWord(
                 nameOfTransactionPlace: string,
@@ -306,7 +311,7 @@ export class TransactionService {
 
     //CATEGORY:
 
-    findAllCategories(): Promise<TransactionCategory[]> {
+    findAllCategories(): Promise<Category[]> {
         const queryBuilder = this.transactionCategoryRepository
             .createQueryBuilder('transaction-category')
             .leftJoinAndSelect('transaction-category.keywords', 'keywords');
@@ -314,17 +319,16 @@ export class TransactionService {
         return r;
     }
 
-    async createCategory(
-        createTransactionCategoryDto: CreateTransactionCategoryDto
-    ): Promise<TransactionCategory> {
+    async createCategory(createTransactionCategoryDto: CreateCategoryDto): Promise<Category> {
         const keywords: Keyword[] = createTransactionCategoryDto.keywords.map(
             (kd) => new Keyword(kd.value)
         );
-        const category: TransactionCategory = new TransactionCategory(
+        const category: Category = new Category(
             createTransactionCategoryDto.name,
             keywords,
             createTransactionCategoryDto.isWants,
-            createTransactionCategoryDto.color
+            createTransactionCategoryDto.color,
+            createTransactionCategoryDto.isExpense
         );
         const savedCategory = await this.transactionCategoryRepository.save(category);
         this.updateTransactionsAfterCategoriesGetUpdated();
@@ -333,9 +337,9 @@ export class TransactionService {
 
     async updateCategory(
         id: number,
-        updateTransactionCategoryDto: UpdateTransactionCategoryDto
-    ): Promise<TransactionCategory> {
-        const category: TransactionCategory = await this.findCategoryById(id);
+        updateTransactionCategoryDto: UpdateCategoryDto
+    ): Promise<Category> {
+        const category: Category = await this.findCategoryById(id);
         const keywords: Keyword[] = await Promise.all(
             updateTransactionCategoryDto.keywords.map(async (kd) => {
                 if (kd.id) {
@@ -352,6 +356,7 @@ export class TransactionService {
             category.keywords = keywords;
             category.isWants = updateTransactionCategoryDto.isWants;
             category.color = updateTransactionCategoryDto.color;
+            category.isExpense = updateTransactionCategoryDto.isExpense;
             const cat = await this.transactionCategoryRepository.save(category);
             if (
                 this.categoryKeywordsGotUpdated(
@@ -383,7 +388,7 @@ export class TransactionService {
         return true;
     }
 
-    async findCategoryById(id: number): Promise<TransactionCategory> {
+    async findCategoryById(id: number): Promise<Category> {
         const cat = await this.transactionCategoryRepository.findOne({ where: { id } });
         if (!cat) {
             throw new NotFoundException(`Category with ${id} was not found`);
@@ -396,10 +401,7 @@ export class TransactionService {
         this.transactionCategoryRepository.delete(options);
     }
 
-    async addKeywordForCategory(
-        category: TransactionCategory,
-        keyword: string
-    ): Promise<TransactionCategory> {
+    async addKeywordForCategory(category: Category, keyword: string): Promise<Category> {
         const catKeywords = await this.keywordService.findAllByCategoryId(category.id);
         catKeywords.push(new Keyword(keyword));
         category.keywords = catKeywords;
